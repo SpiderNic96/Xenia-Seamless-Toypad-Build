@@ -1,0 +1,202 @@
+name: Linux ToyPad AppImage
+
+on:
+  push:
+    branches: [linux-toypad]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Linux ToyPad AppImage
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Cache Vulkan SDK
+        id: cache-vulkan
+        uses: actions/cache@v6
+        with:
+          path: ~/vulkan-sdk
+          key: ${{ runner.os }}-vulkan-sdk-latest
+
+      - name: Cache linuxdeploy
+        id: cache-linuxdeploy
+        uses: actions/cache@v6
+        with:
+          path: ~/linuxdeploy
+          key: ${{ runner.os }}-linuxdeploy-tools
+
+      - name: Setup build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+          sudo apt-add-repository "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-20 main"
+          sudo apt-get -y update
+          sudo apt-get -y install mesa-vulkan-drivers valgrind libc++-dev libc++abi-dev libgtk-3-dev libsdl2-dev libvulkan-dev libx11-xcb-dev clang-20 lld-20 spirv-tools libfuse2
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-20 200
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-20 200
+          sudo update-alternatives --install /usr/bin/lld lld /usr/bin/lld-20 200
+          sudo update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-20 200
+          sudo update-alternatives --install /usr/bin/llvm-ar llvm-ar /usr/bin/llvm-ar-20 200
+          sudo update-alternatives --install /usr/bin/llvm-ranlib llvm-ranlib /usr/bin/llvm-ranlib-20 200
+          sudo update-alternatives --install /usr/bin/llvm-nm llvm-nm /usr/bin/llvm-nm-20 200
+          if [ "${{ steps.cache-linuxdeploy.outputs.cache-hit }}" != "true" ]; then
+            mkdir -p ~/linuxdeploy
+            wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage -O ~/linuxdeploy/linuxdeploy
+            chmod +x ~/linuxdeploy/linuxdeploy
+          fi
+          echo "$HOME/linuxdeploy" >> "$GITHUB_PATH"
+
+      - name: Install Vulkan SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.cache-vulkan.outputs.cache-hit }}" != "true" ]; then
+            wget -qO vulkan-sdk.tar.xz https://sdk.lunarg.com/sdk/download/latest/linux/vulkan-sdk.tar.xz
+            mkdir -p ~/vulkan-sdk
+            tar -xf vulkan-sdk.tar.xz -C ~/vulkan-sdk
+          fi
+          VULKAN_SDK_VERSION=$(ls ~/vulkan-sdk)
+          echo "VULKAN_SDK=$HOME/vulkan-sdk/${VULKAN_SDK_VERSION}/x86_64" >> "$GITHUB_ENV"
+          echo "$HOME/vulkan-sdk/${VULKAN_SDK_VERSION}/x86_64/bin" >> "$GITHUB_PATH"
+
+      - name: Download submodules
+        shell: bash
+        run: |
+          set -euo pipefail
+          SUBMODULES=$(grep -oP '(?<=path = )(?!third_party\/(?:DirectX(?:-Headers|ShaderCompiler)|xbyak_aarch64)).+' .gitmodules)
+          git submodule update --init --depth=1 -j$(getconf _NPROCESSORS_ONLN) $SUBMODULES
+
+      - name: Enable Linux ToyPad
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          input_system = Path("src/xenia/hid/input_system.cc")
+          cmake = Path("src/xenia/hid/portal/CMakeLists.txt")
+
+          s = input_system.read_text()
+          old = '''#ifdef XE_PLATFORM_WIN32
+          #include "xenia/hid/portal/emulated_toypad.h"
+          #include "xenia/hid/portal/hardware_portal.h"
+          #endif  // XE_PLATFORM_WIN32'''
+          new = '''#include "xenia/hid/portal/emulated_toypad.h"
+          #ifdef XE_PLATFORM_WIN32
+          #include "xenia/hid/portal/hardware_portal.h"
+          #endif  // XE_PLATFORM_WIN32'''
+          if old not in s:
+              raise SystemExit("input_system.cc include block not found")
+          s = s.replace(old, new, 1)
+
+          old = '''InputSystem::InputSystem(xe::ui::Window* window) : window_(window) {
+          #ifdef XE_PLATFORM_WIN32
+            if (cvars::toypad_emulation) {
+              portal_ = std::make_unique<EmulatedToypad>();
+            } else {
+              portal_ = std::make_unique<HardwarePortal>();
+            }
+          #endif  // XE_PLATFORM_WIN32
+          }'''
+          new = '''InputSystem::InputSystem(xe::ui::Window* window) : window_(window) {
+            if (cvars::toypad_emulation) {
+              portal_ = std::make_unique<EmulatedToypad>();
+            }
+          #ifdef XE_PLATFORM_WIN32
+            else {
+              portal_ = std::make_unique<HardwarePortal>();
+            }
+          #endif  // XE_PLATFORM_WIN32
+          }'''
+          if old not in s:
+              raise SystemExit("input_system.cc constructor block not found")
+          input_system.write_text(s.replace(old, new, 1))
+
+          s = cmake.read_text()
+          old = '''if(WIN32)
+            target_sources(xenia-hid-portal PRIVATE
+              ${CMAKE_CURRENT_SOURCE_DIR}/hardware_portal.h
+              ${CMAKE_CURRENT_SOURCE_DIR}/hardware_portal.cc
+              ${CMAKE_CURRENT_SOURCE_DIR}/emulated_toypad.h
+              ${CMAKE_CURRENT_SOURCE_DIR}/emulated_toypad.cc
+            )
+            target_link_libraries(xenia-hid-portal PUBLIC libusb ws2_32)
+          endif()
+          xe_target_defaults(xenia-hid-portal)'''
+          new = '''if(WIN32)
+            target_sources(xenia-hid-portal PRIVATE
+              ${CMAKE_CURRENT_SOURCE_DIR}/hardware_portal.h
+              ${CMAKE_CURRENT_SOURCE_DIR}/hardware_portal.cc
+            )
+            target_link_libraries(xenia-hid-portal PUBLIC libusb ws2_32)
+          endif()
+
+          target_sources(xenia-hid-portal PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/emulated_toypad.h
+            ${CMAKE_CURRENT_SOURCE_DIR}/emulated_toypad.cc
+          )
+
+          xe_target_defaults(xenia-hid-portal)'''
+          if old not in s:
+              raise SystemExit("portal CMakeLists.txt block not found")
+          cmake.write_text(s.replace(old, new, 1))
+          print("Linux ToyPad source integration applied")
+          PY
+
+      - name: Verify source patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -n 'emulated_toypad.h' src/xenia/hid/input_system.cc
+          grep -n 'std::make_unique<EmulatedToypad>()' src/xenia/hid/input_system.cc
+          grep -n 'emulated_toypad.cc' src/xenia/hid/portal/CMakeLists.txt
+          git diff --check
+
+      - name: Build Xenia
+        env:
+          CC: clang-20
+          CXX: clang++-20
+        run: ./xenia-build.py build --config=Release
+
+      - name: Verify ToyPad in Linux binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary=build/bin/Linux/Release/xenia_canary
+          test -s "$binary"
+          strings "$binary" | grep -F "Toypad: emulated LEGO Dimensions ToyPad active"
+
+      - name: Prepare AppImage
+        id: appimage
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary=build/bin/Linux/Release/xenia_canary
+          chmod +x "$binary"
+          APPDIR=artifacts/xenia_canary
+          mkdir -p "$APPDIR/usr/bin"
+          for size in 16 32 48 64 128 256 512 1024; do
+            mkdir -p "$APPDIR/usr/share/icons/hicolor/${size}x${size}/apps"
+            cp "assets/icon/${size}.png" "$APPDIR/usr/share/icons/hicolor/${size}x${size}/apps/xenia_canary.png"
+          done
+          find build/bin/Linux/Release -maxdepth 1 -type d ! -name Release -exec cp -r {} "$APPDIR/usr/bin/" \;
+          linuxdeploy --appdir "$APPDIR" --executable "$binary" --desktop-file "$GITHUB_WORKSPACE/assets/xenia_canary.desktop" --icon-file "$GITHUB_WORKSPACE/assets/icon/256.png" --output appimage
+          appimage_file=$(ls -1 *.AppImage | head -n1)
+          test -n "$appimage_file"
+          chmod +x "$appimage_file"
+          mv "$appimage_file" xenia_canary_linux_toypad.AppImage
+
+      - name: Upload Linux ToyPad AppImage
+        uses: actions/upload-artifact@v7
+        with:
+          name: xenia-linux-toypad-appimage
+          path: xenia_canary_linux_toypad.AppImage
+          if-no-files-found: error
+          retention-days: 14
+          archive: false
