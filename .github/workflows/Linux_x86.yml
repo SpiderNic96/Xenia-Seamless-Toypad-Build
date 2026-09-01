@@ -211,7 +211,8 @@ jobs:
           done
 
           # Copy any extra runtime data directories alongside the binary
-          find build/bin/Linux/Release -maxdepth 1 -type d ! -name Release -exec cp -r {} ${APPDIR}/usr/bin/ \;
+          find build/bin/Linux/Release -maxdepth 1 -type d ! -name Release -exec cp -r {} ${APPDIR}/usr/bin/ \
+;
 
           # Build AppImage with linuxdeploy (requires absolute paths)
           linuxdeploy --appdir $APPDIR \
@@ -240,3 +241,5 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           archive: false
+
+# build-trigger: Linux ToyPad AppImage rebuild
