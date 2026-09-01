@@ -2,10 +2,21 @@ name: Toypad Build
 
 on:
   push:
-    branches: [toypad]
+    branches: [linux-toypad]
   workflow_dispatch:
 
 jobs:
   build-windows:
     name: Windows (x86-64)
     uses: ./.github/workflows/Windows_x86.yml
+    with:
+      runs-on: windows-2022
+      llvm_version: 20
+
+  build-linux:
+    name: Linux (x86-64)
+    uses: ./.github/workflows/Linux_x86.yml
+    with:
+      runs-on: ubuntu-24.04
+      llvm_version: 20
+      ubuntu_base: noble
