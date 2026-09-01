@@ -88,11 +88,108 @@ jobs:
           SUBMODULES=$(grep -oP '(?<=path = )(?!third_party\/(?:DirectX(?:-Headers|ShaderCompiler)|xbyak_aarch64)).+' .gitmodules)
           git submodule update --init --depth=1 -j$(getconf _NPROCESSORS_ONLN) $SUBMODULES
 
+      - name: Enable Linux ToyPad
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          input_system = Path("src/xenia/hid/input_system.cc")
+          cmake = Path("src/xenia/hid/portal/CMakeLists.txt")
+
+          s = input_system.read_text()
+          old = '''#ifdef XE_PLATFORM_WIN32
+          #include "xenia/hid/portal/emulated_toypad.h"
+          #include "xenia/hid/portal/hardware_portal.h"
+          #endif  // XE_PLATFORM_WIN32'''
+          new = '''#include "xenia/hid/portal/emulated_toypad.h"
+          #ifdef XE_PLATFORM_WIN32
+          #include "xenia/hid/portal/hardware_portal.h"
+          #endif  // XE_PLATFORM_WIN32'''
+          if old not in s:
+              raise SystemExit("input_system.cc: expected include block not found")
+          s = s.replace(old, new, 1)
+
+          old = '''InputSystem::InputSystem(xe::ui::Window* window) : window_(window) {
+          #ifdef XE_PLATFORM_WIN32
+            if (cvars::toypad_emulation) {
+              portal_ = std::make_unique<EmulatedToypad>();
+            } else {
+              portal_ = std::make_unique<HardwarePortal>();
+            }
+          #endif  // XE_PLATFORM_WIN32
+          }'''
+          new = '''InputSystem::InputSystem(xe::ui::Window* window) : window_(window) {
+            if (cvars::toypad_emulation) {
+              portal_ = std::make_unique<EmulatedToypad>();
+            }
+          #ifdef XE_PLATFORM_WIN32
+            else {
+              portal_ = std::make_unique<HardwarePortal>();
+            }
+          #endif  // XE_PLATFORM_WIN32
+          }'''
+          if old not in s:
+              raise SystemExit("input_system.cc: expected constructor block not found")
+          input_system.write_text(s.replace(old, new, 1))
+
+          s = cmake.read_text()
+          old = '''if(WIN32)
+            target_sources(xenia-hid-portal PRIVATE
+              ${CMAKE_CURRENT_SOURCE_DIR}/hardware_portal.h
+              ${CMAKE_CURRENT_SOURCE_DIR}/hardware_portal.cc
+              ${CMAKE_CURRENT_SOURCE_DIR}/emulated_toypad.h
+              ${CMAKE_CURRENT_SOURCE_DIR}/emulated_toypad.cc
+            )
+            target_link_libraries(xenia-hid-portal PUBLIC libusb ws2_32)
+          endif()
+          xe_target_defaults(xenia-hid-portal)'''
+          new = '''if(WIN32)
+            target_sources(xenia-hid-portal PRIVATE
+              ${CMAKE_CURRENT_SOURCE_DIR}/hardware_portal.h
+              ${CMAKE_CURRENT_SOURCE_DIR}/hardware_portal.cc
+            )
+            target_link_libraries(xenia-hid-portal PUBLIC libusb ws2_32)
+          endif()
+
+          target_sources(xenia-hid-portal PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/emulated_toypad.h
+            ${CMAKE_CURRENT_SOURCE_DIR}/emulated_toypad.cc
+          )
+
+          xe_target_defaults(xenia-hid-portal)'''
+          if old not in s:
+              raise SystemExit("portal CMakeLists.txt: expected WIN32 block not found")
+          cmake.write_text(s.replace(old, new, 1))
+
+          print("Linux ToyPad source integration applied.")
+          PY
+
+      - name: Verify Linux ToyPad integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -n 'emulated_toypad.h' src/xenia/hid/input_system.cc
+          grep -n 'std::make_unique<EmulatedToypad>()' src/xenia/hid/input_system.cc
+          grep -n 'emulated_toypad.cc' src/xenia/hid/portal/CMakeLists.txt
+          git diff --check
+          git diff -- src/xenia/hid/input_system.cc src/xenia/hid/portal/CMakeLists.txt
+
       - name: Build Xenia
         env:
           CC: clang-${{ inputs.llvm_version }}
           CXX: clang++-${{ inputs.llvm_version }}
         run: ./xenia-build.py build --config=Release
+
+      - name: Verify Linux ToyPad binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary=build/bin/Linux/Release/xenia_canary
+          test -s "$binary"
+          strings "$binary" | grep -F "Toypad: emulated LEGO Dimensions ToyPad active"
+          echo "Linux ToyPad implementation is present in the built binary."
 
       - name: Prepare AppImage
         id: prepare_artifacts
