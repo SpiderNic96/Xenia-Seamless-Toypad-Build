@@ -1234,6 +1234,10 @@ bool EmulatorWindow::Initialize() {
     hid_menu->AddChild(MenuItem::Create(
         MenuItem::Type::kString, "&Display controller hotkeys", "",
         std::bind(&EmulatorWindow::DisplayHotKeysConfig, this)));
+    hid_menu->AddChild(MenuItem::Create(MenuItem::Type::kSeparator));
+    hid_menu->AddChild(MenuItem::Create(
+        MenuItem::Type::kString, "Toggle &physical ToyPad (USB)", "",
+        std::bind(&EmulatorWindow::ToggleToypadPassthrough, this)));
   }
   main_menu->AddChild(std::move(hid_menu));
 
@@ -2019,6 +2023,22 @@ void EmulatorWindow::GpuClearCaches() {
 // OVERRIDE_* macros only work in the translation unit that DEFINEs the cvar;
 // these cvars live in the GPU module, so go through the global registry.
 template <typename T>
+static bool GetConfigVarByName(const std::string& name, T& value) {
+  if (!cvar::ConfigVars) {
+    return false;
+  }
+  auto it = cvar::ConfigVars->find(name);
+  if (it == cvar::ConfigVars->end()) {
+    return false;
+  }
+  if (auto* var = dynamic_cast<cvar::ConfigVar<T>*>(it->second)) {
+    value = *var->current_value();
+    return true;
+  }
+  return false;
+}
+
+template <typename T>
 static void OverrideConfigVarByName(const std::string& name, T value) {
   if (!cvar::ConfigVars) {
     return;
@@ -2198,6 +2218,27 @@ void EmulatorWindow::ToggleContentListDialog() {
       content_list_dialog_.reset();
     }
   }
+}
+
+void EmulatorWindow::ToggleToypadPassthrough() {
+  // The portal backend is chosen once, when InputSystem is constructed, so
+  // this only takes effect on the next launch.
+  bool emulated = true;
+  if (!GetConfigVarByName<bool>("toypad_emulation", emulated)) {
+    return;
+  }
+  OverrideConfigVarByName<bool>("toypad_emulation", !emulated);
+
+  const std::string notification_text =
+      emulated
+          ? "Physical ToyPad enabled. Install the libusb driver for the "
+            "portal with Zadig (LEGO READER V2.10, 0E6F:0241), then restart "
+            "Xenia."
+          : "Emulated ToyPad enabled. Restart Xenia to apply.";
+  app_context_.CallInUIThread([this, notification_text]() {
+    new xe::ui::HostNotificationWindow(imgui_drawer(), "ToyPad",
+                                       notification_text, 0);
+  });
 }
 
 void EmulatorWindow::ToggleControllerVibration() {
